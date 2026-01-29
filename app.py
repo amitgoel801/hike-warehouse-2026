@@ -63,13 +63,15 @@ class StorageHandler:
             repo_name = st.secrets["repo_name"]
             g = Github(token)
             return g.get_repo(repo_name)
-        except Exception as e:
+        except Exception:
             return None
 
     @staticmethod
     def upload_file(filename, data, message="Update file"):
         repo = StorageHandler.get_repo()
-        if not repo: return False
+        if not repo: 
+            st.error("GitHub Secrets missing or invalid.")
+            return False
         try:
             try:
                 contents = repo.get_contents(filename)
@@ -77,8 +79,7 @@ class StorageHandler:
             except:
                 repo.create_file(filename, message, data)
         except Exception as e:
-            # We print detailed error to logs for debugging
-            print(f"GITHUB UPLOAD ERROR for {filename}: {e}")
+            st.error(f"Cloud Save Error for {filename}: {e}")
             return False
         return True
 
@@ -109,7 +110,8 @@ def load_history():
         try:
             history = json.loads(data_bytes.decode('utf-8'))
             for h in history:
-                if 'data' in h:
+                # Reconstruct DataFrames from JSON records
+                if 'data' in h: 
                     try: h['data'] = pd.DataFrame(h['data'])
                     except: h['data'] = pd.DataFrame()
                 if 'original_data' in h:
@@ -118,6 +120,8 @@ def load_history():
                 if 'backup_data' in h:
                     try: h['backup_data'] = pd.DataFrame(h['backup_data'])
                     except: h['backup_data'] = pd.DataFrame()
+                
+                # Ensure defaults
                 if 'printed_boxes' not in h: h['printed_boxes'] = []
                 if 'task_type' not in h: h['task_type'] = h.get('task_type', 'execution')
                 if 'is_booked' not in h: h['is_booked'] = True if h.get('task_type') == 'execution' else False
@@ -129,13 +133,14 @@ def save_history(history_list):
     serializable_list = []
     for h in history_list:
         h_copy = h.copy()
+        # Convert DataFrames to JSON-friendly list of dicts
         for key in ['data', 'original_data', 'backup_data']:
             if key in h_copy and isinstance(h_copy[key], pd.DataFrame):
                 h_copy[key] = h_copy[key].to_dict('records')
         serializable_list.append(h_copy)
     
     json_str = json.dumps(serializable_list)
-    StorageHandler.upload_file(HISTORY_FILE, json_str, "Update History")
+    return StorageHandler.upload_file(HISTORY_FILE, json_str, "Update History")
 
 def load_template_db(mode_type):
     fname = TEMPLATE_SINGLE_FILE if mode_type == 'single' else TEMPLATE_MULTI_FILE
@@ -181,10 +186,6 @@ def save_uploaded_file(uploaded_file, c_id, file_type):
     StorageHandler.upload_file(filename, uploaded_file.getbuffer(), f"Upload {file_type}")
     return filename
 
-def get_stored_file_exists(c_id, file_type):
-    filename = f"{c_id}_{file_type}.pdf"
-    return StorageHandler.file_exists(filename)
-
 def get_stored_file_bytes(c_id, file_type):
     filename = f"{c_id}_{file_type}.pdf"
     return StorageHandler.download_file(filename)
@@ -192,6 +193,10 @@ def get_stored_file_bytes(c_id, file_type):
 def get_merged_labels_bytes(c_id):
     filename = f"{c_id}_merged_labels.pdf"
     return StorageHandler.download_file(filename)
+
+def get_stored_file_exists(c_id, file_type):
+    filename = f"{c_id}_{file_type}.pdf"
+    return StorageHandler.file_exists(filename)
 
 # --- QZ TRAY PRINTING ---
 def qz_tray_print_component(pdf_bytes, printer_name):
@@ -207,7 +212,7 @@ def qz_tray_print_component(pdf_bytes, printer_name):
         var data = [{{ type: 'pdf', format: 'base64', data: '{b64_pdf}' }}];
         return qz.print(config, data);
     }}).then(function() {{
-        // Success
+        console.log("Sent to printer");
     }}).catch(function(e) {{
         console.error(e);
         alert("Printing Error: " + e);
@@ -660,7 +665,7 @@ if 'consignments' not in st.session_state: st.session_state['consignments'] = lo
 
 addr_cols = ['Code', 'Address1', 'Address2', 'City', 'State', 'Pincode', 'GST', 'Channel']
 
-# Startup Checks (only run once ideally, but here for safety)
+# Startup Checks
 if not StorageHandler.file_exists(SENDERS_FILE):
     save_address_data(SENDERS_FILE, pd.DataFrame([{'Code': 'MAIN', 'Address1': 'Addr', 'City': 'City', 'Channel': 'All'}]))
 if not StorageHandler.file_exists(RECEIVERS_FILE):
@@ -741,7 +746,11 @@ def render_history_list(tasks):
 def render_scan_interface(df_boxes, pkg, merged_pdf_bytes):
     """Renders the scanning table and input to prevent full page reload"""
     
-    # 1. Scanning Input
+    # Init Tracking in Fragment
+    if 'printed_temp_set' not in st.session_state:
+        st.session_state['printed_temp_set'] = set(pkg.get('printed_boxes', []))
+    
+    # 1. Scanning Logic (Instant, no Cloud Save)
     def process_scan():
         scan_val = st.session_state.scan_input.strip()
         if not scan_val: return
@@ -751,8 +760,8 @@ def render_scan_interface(df_boxes, pkg, merged_pdf_bytes):
         if matches.empty: 
             st.toast(f"❌ Product not found: {scan_val}", icon="⚠️")
         else:
-            printed_set = set(pkg.get('printed_boxes', []))
-            valid_boxes = matches[~matches['Box No'].isin(printed_set)]
+            # Check against local temp set
+            valid_boxes = matches[~matches['Box No'].isin(st.session_state['printed_temp_set'])]
             
             if valid_boxes.empty: 
                 st.toast(f"✅ All boxes for {scan_val} already printed!", icon="ℹ️")
@@ -764,41 +773,48 @@ def render_scan_interface(df_boxes, pkg, merged_pdf_bytes):
                     # Trigger Print JS
                     qz_tray_print_component(pdf_data, st.session_state.get('selected_printer_name', 'ZDesigner GK420t'))
                     
-                    # Update State
+                    # Update Local State
                     st.session_state['last_printed_box'] = int(target_box)
-                    if 'printed_boxes' not in pkg: pkg['printed_boxes'] = []
-                    pkg['printed_boxes'].append(int(target_box))
-                    
-                    # Persist (Background save to avoid lag? No, we must save state)
-                    save_history(st.session_state['consignments'])
+                    st.session_state['printed_temp_set'].add(int(target_box))
+                    st.session_state['unsaved_scan_changes'] = True
                     st.toast(f"🖨️ Sent Box {target_box} to QZ Tray", icon="✅")
                 else: 
                     st.toast("Error extracting label PDF", icon="❌")
         
         st.session_state.scan_input = ""
 
+    # INPUT
     st.text_input("SCAN BARCODE (EAN / SKU / FSN)", key='scan_input', on_change=process_scan, placeholder="Click here and scan...", help="Press Enter after scanning")
 
-    # 2. Status Box
+    # SAVE BUTTON
+    if st.session_state.get('unsaved_scan_changes'):
+        if st.button("💾 Save Progress to Cloud", type="primary", use_container_width=True):
+            # Update main package object
+            pkg['printed_boxes'] = list(st.session_state['printed_temp_set'])
+            # Save to Cloud
+            if save_history(st.session_state['consignments']):
+                st.session_state['unsaved_scan_changes'] = False
+                st.success("Progress Saved!")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("Save Failed")
+
+    # STATUS
     last_p = st.session_state.get('last_printed_box')
     if last_p: 
         st.success(f"🖨️ Last Printed: **BOX {last_p}**")
 
-    # 3. Table
-    printed_set = set(pkg.get('printed_boxes', []))
-    # Add status col
+    # TABLE
     df_display = df_boxes.copy()
-    df_display['Status'] = df_display['Box No'].apply(lambda x: '✅ PRINTED' if x in printed_set else 'WAITING')
+    df_display['Status'] = df_display['Box No'].apply(lambda x: '✅ PRINTED' if x in st.session_state['printed_temp_set'] else 'WAITING')
 
-    # Styling
     def highlight_rows(row):
         box_num = row['Box No']
         if box_num == st.session_state.get('last_printed_box'): return ['background-color: #fff3cd'] * len(row)
         elif row['Status'] == '✅ PRINTED': return ['background-color: #d4edda'] * len(row)
         return [''] * len(row)
 
-    st.caption("Select a row to Reprint")
-    
     event = st.dataframe(
         df_display.style.apply(highlight_rows, axis=1),
         use_container_width=True,
@@ -813,11 +829,9 @@ def render_scan_interface(df_boxes, pkg, merged_pdf_bytes):
         selected_box = df_display.iloc[selected_idx]['Box No']
         
         col_act1, col_act2 = st.columns([3, 1])
-        with col_act1: 
-            st.warning(f"Selected: **Box {selected_box}**")
+        with col_act1: st.warning(f"Selected: **Box {selected_box}**")
         with col_act2:
             if st.button(f"🖨️ Reprint", type="primary", use_container_width=True):
-                # Reprint Logic
                 pdf_data = extract_label_pdf_bytes(merged_pdf_bytes, int(selected_box)-1)
                 if pdf_data:
                     qz_tray_print_component(pdf_data, st.session_state.get('selected_printer_name', 'ZDesigner GK420t'))
@@ -850,7 +864,6 @@ if st.session_state['page'] == 'home':
 # 2. PLAN FLIPKART
 elif st.session_state['page'] == 'plan_flipkart':
     st.title("Plan Flipkart Consignment")
-    
     with st.expander("⚙️ Settings & Templates", expanded=False):
         c1, c2 = st.columns(2)
         cost_val = c1.number_input("Standard Cost (INR) [Col P]", value=350)
@@ -929,7 +942,6 @@ elif st.session_state['page'] == 'plan_flipkart':
         combined_zone_df = st.session_state.get('plan_combined_zone_working', pd.DataFrame()).copy()
         zone_summary_df = st.session_state.get('plan_zone_summary', pd.DataFrame()).copy()
         task_id = st.session_state.get('plan_task_id', f"TASK_{int(time.time())}")
-        
         st.divider()
         st.subheader(f"Results & Editor (Task: {task_id})")
         if 'plan_editor_df' not in st.session_state:
@@ -1304,6 +1316,7 @@ if st.session_state['page'] == 'history':
     st.title("Task History")
     tasks = st.session_state.get('consignments', [])
     tabs = st.tabs(["New Task", "Planning", "Execution", "Booked Summary"])
+    # ... [Tabs 0, 1 same]
     with tabs[0]:
         st.header("Create New Task")
         if st.button("➕ New Plan (Flipkart)"):
