@@ -13,10 +13,8 @@ from reportlab.lib import colors
 from reportlab.pdfgen import canvas
 from pypdf import PdfReader, PdfWriter, Transformation, PageObject
 
-# --- SERVER IMPORTS (Google Drive & QZ Tray) ---
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+# --- SERVER IMPORTS (GitHub & QZ Tray) ---
+from github import Github
 import streamlit.components.v1 as components
 
 # --- CONFIGURATION ---
@@ -59,81 +57,60 @@ STATE_TO_ZONE = {
     'Dadra & Nagar Haveli & Daman & Diu': ('west', 'bhi_vas_wh_nl_01nl')
 }
 
-# --- GOOGLE DRIVE HANDLER (Replaces Local File System) ---
-class DriveHandler:
+# --- GITHUB STORAGE HANDLER ---
+class StorageHandler:
     @staticmethod
-    def get_service():
-        if "gcp_service_account" not in st.secrets:
-            return None
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = service_account.Credentials.from_service_account_info(
-            creds_dict, scopes=['https://www.googleapis.com/auth/drive']
-        )
-        return build('drive', 'v3', credentials=creds)
-
-    @staticmethod
-    def upload_file(filename, data, mime_type='application/octet-stream'):
+    def get_repo():
         try:
-            service = DriveHandler.get_service()
-            if not service: return False
-            folder_id = st.secrets["drive_folder_id"]
-            
-            # Check if file exists
-            query = f"name = '{filename}' and '{folder_id}' in parents and trashed = false"
-            results = service.files().list(q=query, fields="files(id)").execute()
-            items = results.get('files', [])
-
-            # Ensure data is bytes
-            if isinstance(data, str): data = data.encode('utf-8')
-            media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime_type, resumable=True)
-
-            if not items:
-                meta = {'name': filename, 'parents': [folder_id]}
-                service.files().create(body=meta, media_body=media).execute()
-            else:
-                file_id = items[0]['id']
-                service.files().update(fileId=file_id, media_body=media).execute()
-            return True
+            token = st.secrets["github_token"]
+            repo_name = st.secrets["repo_name"]
+            g = Github(token)
+            return g.get_repo(repo_name)
         except Exception as e:
-            st.error(f"Drive Error: {e}")
-            return False
+            st.error(f"GitHub Connection Error: {e}")
+            return None
+
+    @staticmethod
+    def upload_file(filename, data, message="Update file"):
+        repo = StorageHandler.get_repo()
+        if not repo: return False
+        try:
+            # Check if file exists
+            contents = repo.get_contents(filename)
+            # Update
+            repo.update_file(contents.path, message, data, contents.sha)
+        except:
+            # Create
+            try:
+                repo.create_file(filename, message, data)
+            except Exception as e:
+                st.error(f"Save Error: {e}")
+                return False
+        return True
 
     @staticmethod
     def download_file(filename):
+        repo = StorageHandler.get_repo()
+        if not repo: return None
         try:
-            service = DriveHandler.get_service()
-            if not service: return None
-            folder_id = st.secrets["drive_folder_id"]
-            query = f"name = '{filename}' and '{folder_id}' in parents and trashed = false"
-            results = service.files().list(q=query, fields="files(id)").execute()
-            items = results.get('files', [])
-            
-            if not items: return None
-            
-            request = service.files().get_media(fileId=items[0]['id'])
-            fh = io.BytesIO()
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while done is False:
-                status, done = downloader.next_chunk()
-            return fh.getvalue()
-        except Exception:
+            contents = repo.get_contents(filename)
+            return contents.decoded_content
+        except:
             return None
 
     @staticmethod
     def file_exists(filename):
+        repo = StorageHandler.get_repo()
+        if not repo: return False
         try:
-            service = DriveHandler.get_service()
-            if not service: return False
-            folder_id = st.secrets["drive_folder_id"]
-            query = f"name = '{filename}' and '{folder_id}' in parents and trashed = false"
-            results = service.files().list(q=query, fields="files(id)").execute()
-            return len(results.get('files', [])) > 0
-        except: return False
+            repo.get_contents(filename)
+            return True
+        except:
+            return False
 
 # --- DATABASE & HISTORY HELPERS ---
 def load_history():
-    data_bytes = DriveHandler.download_file(HISTORY_FILE)
+    data_bytes = StorageHandler.download_file(HISTORY_FILE)
     if data_bytes:
         try:
             history = json.loads(data_bytes.decode('utf-8'))
@@ -167,11 +144,11 @@ def save_history(history_list):
         serializable_list.append(h_copy)
     
     json_str = json.dumps(serializable_list)
-    DriveHandler.upload_file(HISTORY_FILE, json_str, 'application/json')
+    StorageHandler.upload_file(HISTORY_FILE, json_str, "Update History")
 
 def load_template_db(mode_type):
     fname = TEMPLATE_SINGLE_FILE if mode_type == 'single' else TEMPLATE_MULTI_FILE
-    data = DriveHandler.download_file(fname)
+    data = StorageHandler.download_file(fname)
     if data: return pd.read_csv(io.BytesIO(data), dtype=str)
     return pd.DataFrame()
 
@@ -179,10 +156,10 @@ def save_template_db(df, mode_type):
     fname = TEMPLATE_SINGLE_FILE if mode_type == 'single' else TEMPLATE_MULTI_FILE
     output = io.BytesIO()
     df.to_csv(output, index=False)
-    DriveHandler.upload_file(fname, output.getvalue(), 'text/csv')
+    StorageHandler.upload_file(fname, output.getvalue(), "Update Template")
 
 def load_address_data(file_path, default_cols):
-    data = DriveHandler.download_file(file_path)
+    data = StorageHandler.download_file(file_path)
     if data: return pd.read_excel(io.BytesIO(data), dtype=str)
     return pd.DataFrame(columns=default_cols)
 
@@ -190,7 +167,7 @@ def save_address_data(file_path, df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False)
-    DriveHandler.upload_file(file_path, output.getvalue(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    StorageHandler.upload_file(file_path, output.getvalue(), "Update Address")
 
 # --- MASTER DATA & SYNC ---
 def sync_data():
@@ -199,33 +176,32 @@ def sync_data():
         if 'PPCN' not in df.columns: return False, "Column 'PPCN' missing."
         output = io.BytesIO()
         df.to_csv(output, index=False)
-        DriveHandler.upload_file(CACHE_FILE, output.getvalue(), 'text/csv')
+        StorageHandler.upload_file(CACHE_FILE, output.getvalue(), "Sync Master Data")
         return True, "✅ Master Data Synced!"
     except Exception as e: return False, f"❌ Sync Failed: {e}"
 
 def load_master_data():
-    data = DriveHandler.download_file(CACHE_FILE)
+    data = StorageHandler.download_file(CACHE_FILE)
     if data: return pd.read_csv(io.BytesIO(data), dtype={'EAN': str})
     return pd.DataFrame()
 
 # --- FILE HELPERS (CLOUD) ---
-# We flatten the folder structure for Drive: "c_id/type.pdf" becomes "c_id_type.pdf"
 def save_uploaded_file(uploaded_file, c_id, file_type):
     filename = f"{c_id}_{file_type}.pdf"
-    DriveHandler.upload_file(filename, uploaded_file.getbuffer(), 'application/pdf')
+    StorageHandler.upload_file(filename, uploaded_file.getbuffer(), f"Upload {file_type}")
     return filename
 
 def get_stored_file_exists(c_id, file_type):
     filename = f"{c_id}_{file_type}.pdf"
-    return DriveHandler.file_exists(filename)
+    return StorageHandler.file_exists(filename)
 
 def get_stored_file_bytes(c_id, file_type):
     filename = f"{c_id}_{file_type}.pdf"
-    return DriveHandler.download_file(filename)
+    return StorageHandler.download_file(filename)
 
 def get_merged_labels_bytes(c_id):
     filename = f"{c_id}_merged_labels.pdf"
-    return DriveHandler.download_file(filename)
+    return StorageHandler.download_file(filename)
 
 # --- QZ TRAY PRINTING (Browser Based) ---
 def qz_tray_print_component(pdf_bytes, printer_name):
@@ -346,7 +322,6 @@ def generate_merged_box_labels(df, c_details, sender, receiver, flipkart_pdf_byt
             result_page.merge_page(fk_page)
             writer.add_page(result_page)
         else:
-            # Handle excess custom boxes
             result_page = PageObject.create_blank_page(width=w_a4, height=h_a4)
             result_page.merge_page(custom_page)
             writer.add_page(result_page)
@@ -717,13 +692,11 @@ def calculate_single_warehouse_plan(sales_df, inv_df, settings, include_duplicat
 if 'page' not in st.session_state: st.session_state['page'] = 'home'
 if 'consignments' not in st.session_state: st.session_state['consignments'] = load_history()
 
-# --- FIX: We define this LIST first, BEFORE using it below ---
 addr_cols = ['Code', 'Address1', 'Address2', 'City', 'State', 'Pincode', 'GST', 'Channel']
 
-# Now we check for files. Since addr_cols is defined above, this will work.
-if not DriveHandler.file_exists(SENDERS_FILE):
+if not StorageHandler.file_exists(SENDERS_FILE):
     save_address_data(SENDERS_FILE, pd.DataFrame([{'Code': 'MAIN', 'Address1': 'Addr', 'City': 'City', 'Channel': 'All'}]))
-if not DriveHandler.file_exists(RECEIVERS_FILE):
+if not StorageHandler.file_exists(RECEIVERS_FILE):
     save_address_data(RECEIVERS_FILE, pd.DataFrame(columns=addr_cols))
 
 def nav(page):
@@ -761,9 +734,9 @@ with st.sidebar:
         if s: st.success(m)
         else: st.error(m)
     
-    # Check drive connection
-    if DriveHandler.get_service() is None:
-        st.error("⚠️ Drive Secrets Missing")
+    # Check github connection
+    if StorageHandler.get_repo() is None:
+        st.error("⚠️ GitHub Secrets Missing")
 
 # ---------------- History Page ----------------
 if st.session_state['page'] == 'history':
@@ -1276,7 +1249,7 @@ elif st.session_state['page'] == 'view_saved':
                     snd = pkg.get('sender', {}); rcv = pkg.get('receiver', {})
                     merged_bytes = generate_merged_box_labels(pkg['data'], pkg, snd, rcv, path_lbl, progress_bar)
                     if merged_bytes:
-                        DriveHandler.upload_file(f"{c_id}_merged_labels.pdf", merged_bytes, 'application/pdf')
+                        StorageHandler.upload_file(f"{c_id}_merged_labels.pdf", merged_bytes, "Save Merged Labels")
                         progress_bar.progress(100, text="Completed!"); time.sleep(1)
                         st.success("Uploaded & Merged!"); st.rerun()
                 else: st.error("Failed to retrieve uploaded file")
