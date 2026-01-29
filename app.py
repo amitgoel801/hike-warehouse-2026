@@ -716,6 +716,11 @@ def calculate_single_warehouse_plan(sales_df, inv_df, settings, include_duplicat
 # --- APP NAVIGATION ---
 if 'page' not in st.session_state: st.session_state['page'] = 'home'
 if 'consignments' not in st.session_state: st.session_state['consignments'] = load_history()
+
+# --- FIX: We define this LIST first, BEFORE using it below ---
+addr_cols = ['Code', 'Address1', 'Address2', 'City', 'State', 'Pincode', 'GST', 'Channel']
+
+# Now we check for files. Since addr_cols is defined above, this will work.
 if not DriveHandler.file_exists(SENDERS_FILE):
     save_address_data(SENDERS_FILE, pd.DataFrame([{'Code': 'MAIN', 'Address1': 'Addr', 'City': 'City', 'Channel': 'All'}]))
 if not DriveHandler.file_exists(RECEIVERS_FILE):
