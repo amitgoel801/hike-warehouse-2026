@@ -64,7 +64,6 @@ class StorageHandler:
             g = Github(token)
             return g.get_repo(repo_name)
         except Exception as e:
-            # Silent fail to avoid UI clutter
             return None
 
     @staticmethod
@@ -72,14 +71,14 @@ class StorageHandler:
         repo = StorageHandler.get_repo()
         if not repo: return False
         try:
-            # Check if file exists
             try:
                 contents = repo.get_contents(filename)
                 repo.update_file(contents.path, message, data, contents.sha)
             except:
                 repo.create_file(filename, message, data)
         except Exception as e:
-            print(f"Save Error: {e}")
+            # We print detailed error to logs for debugging
+            print(f"GITHUB UPLOAD ERROR for {filename}: {e}")
             return False
         return True
 
@@ -851,6 +850,7 @@ if st.session_state['page'] == 'home':
 # 2. PLAN FLIPKART
 elif st.session_state['page'] == 'plan_flipkart':
     st.title("Plan Flipkart Consignment")
+    
     with st.expander("⚙️ Settings & Templates", expanded=False):
         c1, c2 = st.columns(2)
         cost_val = c1.number_input("Standard Cost (INR) [Col P]", value=350)
@@ -929,6 +929,7 @@ elif st.session_state['page'] == 'plan_flipkart':
         combined_zone_df = st.session_state.get('plan_combined_zone_working', pd.DataFrame()).copy()
         zone_summary_df = st.session_state.get('plan_zone_summary', pd.DataFrame()).copy()
         task_id = st.session_state.get('plan_task_id', f"TASK_{int(time.time())}")
+        
         st.divider()
         st.subheader(f"Results & Editor (Task: {task_id})")
         if 'plan_editor_df' not in st.session_state:
