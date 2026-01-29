@@ -13,7 +13,7 @@ from reportlab.lib import colors
 from reportlab.pdfgen import canvas
 from pypdf import PdfReader, PdfWriter, Transformation, PageObject
 
-# --- SERVER IMPORTS (GitHub & QZ Tray) ---
+# --- SERVER IMPORTS ---
 from github import Github
 import streamlit.components.v1 as components
 
@@ -28,11 +28,8 @@ RECEIVERS_FILE = "receivers.xlsx"
 TEMPLATE_SINGLE_FILE = "active_listing_single.csv"
 TEMPLATE_MULTI_FILE = "active_listing_multi.csv"
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRdLEddTZgmuUSswPp3A_HM7DGH8UCUWEmqd-cIbbJ7nb_Eq4YvZxO0vjWESlxX-9Y6VWRcVLPFlIVp/pub?gid=0&single=true&output=csv"
-
-# --- ZONES ORDER ---
 ZONES_ORDER = ['South', 'West', 'East', 'North']
 
-# --- MAPPING DATA ---
 STATE_TO_ZONE = {
     'Arunachal Pradesh': ('east', 'ulub_bts'), 'Assam': ('east', 'ulub_bts'),
     'Nagaland': ('east', 'ulub_bts'), 'Meghalaya': ('east', 'ulub_bts'),
@@ -67,7 +64,7 @@ class StorageHandler:
             g = Github(token)
             return g.get_repo(repo_name)
         except Exception as e:
-            st.error(f"GitHub Connection Error: {e}")
+            # Silent fail to avoid UI clutter
             return None
 
     @staticmethod
@@ -76,16 +73,14 @@ class StorageHandler:
         if not repo: return False
         try:
             # Check if file exists
-            contents = repo.get_contents(filename)
-            # Update
-            repo.update_file(contents.path, message, data, contents.sha)
-        except:
-            # Create
             try:
+                contents = repo.get_contents(filename)
+                repo.update_file(contents.path, message, data, contents.sha)
+            except:
                 repo.create_file(filename, message, data)
-            except Exception as e:
-                st.error(f"Save Error: {e}")
-                return False
+        except Exception as e:
+            print(f"Save Error: {e}")
+            return False
         return True
 
     @staticmethod
@@ -108,7 +103,7 @@ class StorageHandler:
         except:
             return False
 
-# --- DATABASE & HISTORY HELPERS ---
+# --- DATA HELPERS ---
 def load_history():
     data_bytes = StorageHandler.download_file(HISTORY_FILE)
     if data_bytes:
@@ -135,12 +130,9 @@ def save_history(history_list):
     serializable_list = []
     for h in history_list:
         h_copy = h.copy()
-        if 'data' in h_copy and isinstance(h_copy['data'], pd.DataFrame):
-            h_copy['data'] = h_copy['data'].to_dict('records')
-        if 'original_data' in h_copy and isinstance(h_copy['original_data'], pd.DataFrame):
-            h_copy['original_data'] = h_copy['original_data'].to_dict('records')
-        if 'backup_data' in h_copy and isinstance(h_copy['backup_data'], pd.DataFrame):
-            h_copy['backup_data'] = h_copy['backup_data'].to_dict('records')
+        for key in ['data', 'original_data', 'backup_data']:
+            if key in h_copy and isinstance(h_copy[key], pd.DataFrame):
+                h_copy[key] = h_copy[key].to_dict('records')
         serializable_list.append(h_copy)
     
     json_str = json.dumps(serializable_list)
@@ -169,7 +161,6 @@ def save_address_data(file_path, df):
         df.to_excel(writer, index=False)
     StorageHandler.upload_file(file_path, output.getvalue(), "Update Address")
 
-# --- MASTER DATA & SYNC ---
 def sync_data():
     try:
         df = pd.read_csv(SHEET_URL, dtype={'EAN': str})
@@ -185,7 +176,7 @@ def load_master_data():
     if data: return pd.read_csv(io.BytesIO(data), dtype={'EAN': str})
     return pd.DataFrame()
 
-# --- FILE HELPERS (CLOUD) ---
+# --- FILE HELPERS ---
 def save_uploaded_file(uploaded_file, c_id, file_type):
     filename = f"{c_id}_{file_type}.pdf"
     StorageHandler.upload_file(filename, uploaded_file.getbuffer(), f"Upload {file_type}")
@@ -203,9 +194,8 @@ def get_merged_labels_bytes(c_id):
     filename = f"{c_id}_merged_labels.pdf"
     return StorageHandler.download_file(filename)
 
-# --- QZ TRAY PRINTING (Browser Based) ---
+# --- QZ TRAY PRINTING ---
 def qz_tray_print_component(pdf_bytes, printer_name):
-    """Injects JavaScript to print the PDF using QZ Tray."""
     if not pdf_bytes: return
     b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
     js_code = f"""
@@ -218,7 +208,7 @@ def qz_tray_print_component(pdf_bytes, printer_name):
         var data = [{{ type: 'pdf', format: 'base64', data: '{b64_pdf}' }}];
         return qz.print(config, data);
     }}).then(function() {{
-        // Optional success alert
+        // Success
     }}).catch(function(e) {{
         console.error(e);
         alert("Printing Error: " + e);
@@ -238,7 +228,7 @@ def extract_label_pdf_bytes(merged_pdf_bytes, box_index):
         return out.getvalue()
     except: return None
 
-# --- PDF & EXCEL GENERATION LOGIC ---
+# --- PDF LOGIC ---
 def generate_confirm_consignment_csv(df):
     output = io.BytesIO()
     active_df = df[df['Editable Boxes'] > 0].sort_values(by='SKU Id')
@@ -285,6 +275,8 @@ def generate_merged_box_labels(df, c_details, sender, receiver, flipkart_pdf_byt
     w_a4, h_a4 = A4; half_h = h_a4 / 2; SHIFT_UP = 25 * mm
     total_items = len(box_data)
     
+    temp_reader = PdfReader(io.BytesIO(flipkart_pdf_bytes))
+    
     for i, box in enumerate(box_data):
         if progress_bar: progress_bar.progress(int((i + 1) / total_items * 100), text=f"Processing Box {i+1}...")
         packet = io.BytesIO()
@@ -308,7 +300,6 @@ def generate_merged_box_labels(df, c_details, sender, receiver, flipkart_pdf_byt
         custom_page = PdfReader(packet).pages[0]
         
         fk_page_idx = i // 2; is_top_label = (i % 2 == 0)
-        temp_reader = PdfReader(io.BytesIO(flipkart_pdf_bytes))
         
         if fk_page_idx < len(temp_reader.pages):
             result_page = PageObject.create_blank_page(width=w_a4, height=h_a4)
@@ -404,37 +395,7 @@ def generate_bartender_full(df):
         export_df.to_excel(writer, index=False)
     return output.getvalue()
 
-# ----------------- Helpers for splitting by quantity -----------------
-def split_df_by_quantity_limit(df, qty_col, limit):
-    chunks = []
-    current_rows = []
-    current_sum = 0
-    for _, row in df.iterrows():
-        q = int(row[qty_col]) if pd.notna(row[qty_col]) else 0
-        if q > limit:
-            if current_rows:
-                chunks.append(pd.DataFrame(current_rows))
-                current_rows = []
-                current_sum = 0
-            chunks.append(pd.DataFrame([row]))
-            continue
-        if current_sum + q > limit:
-            if current_rows:
-                chunks.append(pd.DataFrame(current_rows))
-            current_rows = [row]
-            current_sum = q
-        else:
-            current_rows.append(row)
-            current_sum += q
-    if current_rows:
-        chunks.append(pd.DataFrame(current_rows))
-    final = []
-    for c in chunks:
-        if isinstance(c, pd.DataFrame): final.append(c.reset_index(drop=True))
-        else: final.append(pd.DataFrame(c).reset_index(drop=True))
-    return final
-
-# ----------------- Booked calculation helpers -----------------
+# --- HELPER LOGIC ---
 def clean_sku(val):
     if not isinstance(val, str): return str(val)
     val = val.replace('"', '').replace("'", "")
@@ -444,8 +405,7 @@ def clean_sku(val):
 def compute_booked_details_from_history():
     history = load_history()
     today = pd.Timestamp.now().date()
-    details = {}
-    dates_set = set()
+    details = {}; dates_set = set()
     for h in history:
         if h.get('task_type') != 'execution': continue
         if h.get('is_booked') is False: continue
@@ -461,20 +421,16 @@ def compute_booked_details_from_history():
                         if re.search(r'^sku', col, re.IGNORECASE): sku_col = col; break
                     if not sku_col: continue
                     sku = clean_sku(r[sku_col])
-                    
                     qty_col = None
                     for col in df.columns:
                         if re.search(r'editable qty|quantity|qty', col, re.IGNORECASE): qty_col = col; break
-                    
                     box_col = None
                     for col in df.columns:
                         if re.search(r'editable boxes|boxes|box', col, re.IGNORECASE): box_col = col; break
-                    
                     try: q = int(float(r.get(qty_col, 0))) if qty_col else 0
                     except: q = 0
                     try: b = int(float(r.get(box_col, 0))) if box_col else 0
                     except: b = 0
-                    
                     if sku not in details: details[sku] = {'total_qty': 0, 'total_boxes': 0, 'dates': {}}
                     details[sku]['total_qty'] += q; details[sku]['total_boxes'] += b
                     ds = details[sku]['dates']; ds.setdefault(str(d_obj), {'qty': 0, 'boxes': 0})
@@ -487,9 +443,7 @@ def compute_booked_map_from_details(details):
     return m
 
 def generate_booked_summary_pdf_bytes(booked_details, selected_dates=None):
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4)
-    styles = getSampleStyleSheet()
+    buffer = io.BytesIO(); doc = SimpleDocTemplate(buffer, pagesize=A4); styles = getSampleStyleSheet()
     elements = [Paragraph("<b>Booked Summary</b>", styles['Heading2']), Spacer(1, 6)]
     table_data = [['SKU', 'Total Qty', 'Total Boxes', 'Pickup Dates (dd Mon:qty(box))']]
     for sku in sorted(booked_details.keys(), key=lambda s: s.upper()):
@@ -512,21 +466,37 @@ def generate_booked_summary_pdf_bytes(booked_details, selected_dates=None):
     doc.build(elements); buffer.seek(0)
     return buffer.getvalue()
 
-# ----------------- Planning Logic -----------------
+def split_df_by_quantity_limit(df, qty_col, limit):
+    chunks = []; current_rows = []; current_sum = 0
+    for _, row in df.iterrows():
+        q = int(row[qty_col]) if pd.notna(row[qty_col]) else 0
+        if q > limit:
+            if current_rows:
+                chunks.append(pd.DataFrame(current_rows)); current_rows = []; current_sum = 0
+            chunks.append(pd.DataFrame([row])); continue
+        if current_sum + q > limit:
+            if current_rows: chunks.append(pd.DataFrame(current_rows))
+            current_rows = [row]; current_sum = q
+        else: current_rows.append(row); current_sum += q
+    if current_rows: chunks.append(pd.DataFrame(current_rows))
+    final = []
+    for c in chunks:
+        if isinstance(c, pd.DataFrame): final.append(c.reset_index(drop=True))
+        else: final.append(pd.DataFrame(c).reset_index(drop=True))
+    return final
+
 def calculate_single_warehouse_plan(sales_df, inv_df, settings, include_duplicates, mode_type):
     tpl_df = load_template_db(mode_type)
     booked_details, _ = compute_booked_details_from_history()
     booked_map = compute_booked_map_from_details(booked_details)
-
+    
     sales_df.columns = [str(c).strip() for c in sales_df.columns]
     if 'SKU' in sales_df.columns: col_sku = 'SKU'
     elif len(sales_df.columns) > 5: col_sku = sales_df.columns[5]
     else: return pd.DataFrame(), "SKU Column not found", pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
     if 'Quantity' in sales_df.columns: col_qty = 'Quantity'
     elif len(sales_df.columns) > 13: col_qty = sales_df.columns[13]
     else: return pd.DataFrame(), "Quantity Column not found", pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
     possible_state = [c for c in sales_df.columns if 'Delivery State' in str(c)]
     if possible_state: col_state = possible_state[0]
     elif len(sales_df.columns) > 50: col_state = sales_df.columns[50]
@@ -548,8 +518,7 @@ def calculate_single_warehouse_plan(sales_df, inv_df, settings, include_duplicat
         filtered_sales[col_qty] = pd.to_numeric(filtered_sales[col_qty], errors='coerce').fillna(0)
         global_sales = filtered_sales.groupby('Clean_SKU')[col_qty].sum().to_dict()
         zone_sales = filtered_sales.groupby(['Clean_SKU', 'Zone'])[col_qty].sum().reset_index()
-    else:
-        global_sales = {}; zone_sales = pd.DataFrame(columns=['Clean_SKU','Zone',col_qty])
+    else: global_sales = {}; zone_sales = pd.DataFrame(columns=['Clean_SKU','Zone',col_qty])
 
     inv_df.columns = [str(c).strip() for c in inv_df.columns]
     inv_grouped = {}
@@ -597,11 +566,9 @@ def calculate_single_warehouse_plan(sales_df, inv_df, settings, include_duplicat
 
         try: req_net = float(tot_sales) - float(tot_stock_orig) - float(booked_qty)
         except: req_net = 0.0
-
         total_boxes_needed = int(math.floor(req_net / ppcn)) if ppcn > 0 else 0
         boxes_for_summary = total_boxes_needed
         final_qty_for_summary = total_boxes_needed * ppcn
-
         summary_rows.append({'SKU': sku, 'Sales_30': tot_sales, 'FBF_Qty': int(tot_stock_orig), 'Qty_Booked': int(booked_qty), 'Needed_Qty': req_net, 'Boxes': int(boxes_for_summary), 'Final_Qty': int(final_qty_for_summary), 'PPCN': int(ppcn)})
 
         sku_z_data = zone_sales[zone_sales['Clean_SKU'] == sku].copy()
@@ -688,12 +655,13 @@ def calculate_single_warehouse_plan(sales_df, inv_df, settings, include_duplicat
 
     return final_rows_df, "Success", summary_df, zone_summary_df, combined
 
-# --- APP NAVIGATION ---
+# --- APP NAVIGATION & STARTUP ---
 if 'page' not in st.session_state: st.session_state['page'] = 'home'
 if 'consignments' not in st.session_state: st.session_state['consignments'] = load_history()
 
 addr_cols = ['Code', 'Address1', 'Address2', 'City', 'State', 'Pincode', 'GST', 'Channel']
 
+# Startup Checks (only run once ideally, but here for safety)
 if not StorageHandler.file_exists(SENDERS_FILE):
     save_address_data(SENDERS_FILE, pd.DataFrame([{'Code': 'MAIN', 'Address1': 'Addr', 'City': 'City', 'Channel': 'All'}]))
 if not StorageHandler.file_exists(RECEIVERS_FILE):
@@ -734,89 +702,130 @@ with st.sidebar:
         if s: st.success(m)
         else: st.error(m)
     
-    # Check github connection
     if StorageHandler.get_repo() is None:
         st.error("⚠️ GitHub Secrets Missing")
 
-# ---------------- History Page ----------------
-if st.session_state['page'] == 'history':
-    st.title("Task History")
-    tasks = st.session_state.get('consignments', [])
-    tabs = st.tabs(["New Task", "Planning", "Execution", "Booked Summary"])
-    with tabs[0]:
-        st.header("Create New Task")
-        if st.button("➕ New Plan (Flipkart)"):
-            st.session_state['plan_channel'] = 'Flipkart'; nav('plan_flipkart')
-    with tabs[1]:
-        st.header("Planning Tasks")
-        planning = [t for t in tasks if t.get('task_type') == 'planning']
-        if not planning: st.info("No planning tasks yet.")
-        else:
-            for t in planning:
-                st.subheader(f"Task: {t['id']} | Date: {t.get('date','-')} | Channel: {t.get('channel','-')}")
-                if isinstance(t.get('data', None), pd.DataFrame):
-                    df_preview = t['data'].copy()
-                    if 'Qty_Booked' not in df_preview.columns: df_preview['Qty_Booked'] = 0
-                    st.dataframe(df_preview.head(6), use_container_width=True)
-                if st.button(f"Open {t['id']}", key=f"open_plan_{t['id']}"):
-                    st.session_state['plan_task_id'] = t['id']
-                    st.session_state['plan_results'] = t.get('data', pd.DataFrame()).copy()
-                    st.session_state['plan_summary'] = t.get('original_data', pd.DataFrame()).copy() if isinstance(t.get('original_data', None), pd.DataFrame) else pd.DataFrame()
-                    ed = st.session_state['plan_results'].copy() if isinstance(st.session_state['plan_results'], pd.DataFrame) else pd.DataFrame()
-                    if 'Select' not in ed.columns: ed.insert(0, 'Select', True)
-                    if 'Qty_Booked' not in ed.columns: ed['Qty_Booked'] = 0
-                    for c in ['Editable Boxes','Editable Qty','PPCN','Stock','Required Qty','Qty_Booked']:
-                        if c in ed.columns: ed[c] = pd.to_numeric(ed[c], errors='coerce').fillna(0).astype(int)
-                    if 'SKU Id' in ed.columns: ed = ed.sort_values(by='SKU Id', key=lambda s: s.str.upper()).reset_index(drop=True)
-                    st.session_state['plan_editor_df'] = ed.reset_index(drop=True)
-                    st.session_state['plan_mode_key'] = t.get('mode_key', 'single')
-                    st.session_state['plan_channel'] = t.get('channel', 'Flipkart')
-                    nav('plan_flipkart')
-    with tabs[2]:
-        st.header("Execution (Shipments / Manual) Tasks")
-        execs = [t for t in tasks if t.get('task_type') == 'execution']
-        if not execs: st.info("No execution tasks yet.")
-        else:
-            for t in execs:
-                st.subheader(f"Task: {t['id']} | Date: {t.get('date','-')} | Channel: {t.get('channel','-')}")
-                if isinstance(t.get('data', None), pd.DataFrame): st.dataframe(t['data'].head(6), use_container_width=True)
+# --- UI FRAGMENTS (Optimized Rendering) ---
+
+@st.fragment
+def render_history_list(tasks):
+    """Renders the history list without reloading the full page"""
+    if not tasks:
+        st.info("No execution tasks yet.")
+        return
+        
+    for t in tasks:
+        # Visual Container per task
+        with st.container(border=True):
+            col_info, col_act = st.columns([0.7, 0.3])
+            with col_info:
+                st.markdown(f"**{t['id']}**")
+                st.caption(f"📅 {t.get('date','-')} | 🏷️ {t.get('channel','-')}")
                 is_b = t.get('is_booked', True)
-                st.write(f"Booked status: **{'BOOKED' if is_b else 'UNBOOKED'}**")
-                if st.button(f"Toggle Booked for {t['id']}", key=f"toggle_booked_{t['id']}"):
+                st.caption(f"Status: **{'✅ BOOKED' if is_b else '❌ UNBOOKED'}**")
+            
+            with col_act:
+                if st.button(f"Open", key=f"open_exec_{t['id']}", use_container_width=True):
+                    st.session_state['curr_con'] = t
+                    st.session_state['page'] = 'view_saved'
+                    st.rerun() # Necessary to change page
+                
+                if st.button(f"Toggle Booked", key=f"toggle_booked_{t['id']}", use_container_width=True):
+                    # Toggle logic
                     for idx, hh in enumerate(st.session_state['consignments']):
                         if hh['id'] == t['id']:
                             st.session_state['consignments'][idx]['is_booked'] = not st.session_state['consignments'][idx].get('is_booked', True)
                             save_history(st.session_state['consignments'])
                             st.rerun()
-                if st.button(f"Open {t['id']}", key=f"open_exec_{t['id']}"):
-                    st.session_state['curr_con'] = t; nav('view_saved')
-    with tabs[3]:
-        st.header("Booked Summary")
-        booked_details, available_dates = compute_booked_details_from_history()
-        if not booked_details: st.info("No booked quantities found.")
+
+@st.fragment
+def render_scan_interface(df_boxes, pkg, merged_pdf_bytes):
+    """Renders the scanning table and input to prevent full page reload"""
+    
+    # 1. Scanning Input
+    def process_scan():
+        scan_val = st.session_state.scan_input.strip()
+        if not scan_val: return
+        
+        matches = df_boxes[(df_boxes['SKU'] == scan_val) | (df_boxes['FSN'] == scan_val) | (df_boxes['EAN'] == scan_val)]
+        
+        if matches.empty: 
+            st.toast(f"❌ Product not found: {scan_val}", icon="⚠️")
         else:
-            st.subheader("Available pickup dates")
-            available_dates_sorted = sorted(available_dates)
-            selected_dates = st.multiselect("Select pickup dates", options=available_dates_sorted, default=available_dates_sorted)
-            rows = []
-            for sku, d in booked_details.items():
-                if selected_dates:
-                    filtered = {dt:info for dt,info in d['dates'].items() if dt in selected_dates}
-                    total_qty = sum(info['qty'] for info in filtered.values())
-                    total_boxes = sum(info['boxes'] for info in filtered.values())
-                    if total_qty == 0: continue
-                    dates_str = ", ".join([f"{pd.to_datetime(dt).strftime('%d %b')}:{info['qty']}({info['boxes']})" for dt,info in filtered.items()])
-                else:
-                    total_qty = d.get('total_qty', 0)
-                    total_boxes = d.get('total_boxes', 0)
-                    dates_str = ", ".join([f"{pd.to_datetime(dt).strftime('%d %b')}:{info['qty']}({info['boxes']})" for dt,info in d.get('dates', {}).items()])
-                rows.append({'SKU': sku, 'Qty': total_qty, 'Boxes': total_boxes, 'Dates': dates_str})
-            if not rows: st.info("No booked SKUs for selected dates.")
+            printed_set = set(pkg.get('printed_boxes', []))
+            valid_boxes = matches[~matches['Box No'].isin(printed_set)]
+            
+            if valid_boxes.empty: 
+                st.toast(f"✅ All boxes for {scan_val} already printed!", icon="ℹ️")
             else:
-                bm_df = pd.DataFrame(rows).sort_values(by='SKU', key=lambda s: s.str.upper()).reset_index(drop=True)
-                st.dataframe(bm_df, use_container_width=True)
-                pdf_bytes = generate_booked_summary_pdf_bytes(booked_details, selected_dates if selected_dates else None)
-                st.download_button("⬇ Download Booked Summary PDF", pdf_bytes, file_name="Booked_Summary.pdf", mime="application/pdf")
+                target_box = valid_boxes.iloc[0]['Box No']
+                pdf_data = extract_label_pdf_bytes(merged_pdf_bytes, int(target_box)-1)
+                
+                if pdf_data:
+                    # Trigger Print JS
+                    qz_tray_print_component(pdf_data, st.session_state.get('selected_printer_name', 'ZDesigner GK420t'))
+                    
+                    # Update State
+                    st.session_state['last_printed_box'] = int(target_box)
+                    if 'printed_boxes' not in pkg: pkg['printed_boxes'] = []
+                    pkg['printed_boxes'].append(int(target_box))
+                    
+                    # Persist (Background save to avoid lag? No, we must save state)
+                    save_history(st.session_state['consignments'])
+                    st.toast(f"🖨️ Sent Box {target_box} to QZ Tray", icon="✅")
+                else: 
+                    st.toast("Error extracting label PDF", icon="❌")
+        
+        st.session_state.scan_input = ""
+
+    st.text_input("SCAN BARCODE (EAN / SKU / FSN)", key='scan_input', on_change=process_scan, placeholder="Click here and scan...", help="Press Enter after scanning")
+
+    # 2. Status Box
+    last_p = st.session_state.get('last_printed_box')
+    if last_p: 
+        st.success(f"🖨️ Last Printed: **BOX {last_p}**")
+
+    # 3. Table
+    printed_set = set(pkg.get('printed_boxes', []))
+    # Add status col
+    df_display = df_boxes.copy()
+    df_display['Status'] = df_display['Box No'].apply(lambda x: '✅ PRINTED' if x in printed_set else 'WAITING')
+
+    # Styling
+    def highlight_rows(row):
+        box_num = row['Box No']
+        if box_num == st.session_state.get('last_printed_box'): return ['background-color: #fff3cd'] * len(row)
+        elif row['Status'] == '✅ PRINTED': return ['background-color: #d4edda'] * len(row)
+        return [''] * len(row)
+
+    st.caption("Select a row to Reprint")
+    
+    event = st.dataframe(
+        df_display.style.apply(highlight_rows, axis=1),
+        use_container_width=True,
+        hide_index=True,
+        height=500,
+        on_select="rerun",
+        selection_mode="single-row"
+    )
+
+    if event.selection.rows:
+        selected_idx = event.selection.rows[0]
+        selected_box = df_display.iloc[selected_idx]['Box No']
+        
+        col_act1, col_act2 = st.columns([3, 1])
+        with col_act1: 
+            st.warning(f"Selected: **Box {selected_box}**")
+        with col_act2:
+            if st.button(f"🖨️ Reprint", type="primary", use_container_width=True):
+                # Reprint Logic
+                pdf_data = extract_label_pdf_bytes(merged_pdf_bytes, int(selected_box)-1)
+                if pdf_data:
+                    qz_tray_print_component(pdf_data, st.session_state.get('selected_printer_name', 'ZDesigner GK420t'))
+                    st.session_state['last_printed_box'] = int(selected_box)
+                    st.toast(f"🖨️ Re-sent Box {selected_box}", icon="✅")
+
+# --- PAGES ---
 
 # 1. HOME
 if st.session_state['page'] == 'home':
@@ -835,9 +844,6 @@ if st.session_state['page'] == 'home':
         m1.metric("📦 Total Boxes Sent", int(df_h['Boxes'].sum()) if not df_h.empty else 0)
         m2.metric("👟 Total Pairs/Qty", int(df_h['Qty'].sum()) if not df_h.empty else 0)
         m3.metric("📅 Last Shipment", df_h['Date'].max().strftime('%d-%b-%Y') if not df_h.empty and pd.notna(df_h['Date'].max()) else "N/A")
-        st.subheader("Volume by Channel")
-        try: st.bar_chart(df_h.groupby('Channel')['Boxes'].sum(), color="#FF4B4B")
-        except: pass
         st.subheader("Recent Activity")
         st.dataframe(df_h.sort_values(by='Date', ascending=False).head(5), use_container_width=True)
     else: st.info("No consignments found.")
@@ -920,13 +926,11 @@ elif st.session_state['page'] == 'plan_flipkart':
     if 'plan_results' in st.session_state:
         df_res = st.session_state['plan_results'].copy()
         summary_df = st.session_state.get('plan_summary', pd.DataFrame()).copy()
-        zone_summary_df = st.session_state.get('plan_zone_summary', pd.DataFrame()).copy()
         combined_zone_df = st.session_state.get('plan_combined_zone_working', pd.DataFrame()).copy()
+        zone_summary_df = st.session_state.get('plan_zone_summary', pd.DataFrame()).copy()
         task_id = st.session_state.get('plan_task_id', f"TASK_{int(time.time())}")
         st.divider()
         st.subheader(f"Results & Editor (Task: {task_id})")
-        st.markdown("You can **select rows** to save as a consignment.")
-        tabs = st.tabs(["None (All)"] + ZONES_ORDER)
         if 'plan_editor_df' not in st.session_state:
             if df_res.empty: st.session_state['plan_editor_df'] = pd.DataFrame(columns=['Select','SKU Id','Zone','Required Qty','Editable Boxes','Editable Qty','PPCN','Stock','Qty_Booked'])
             else:
@@ -937,120 +941,21 @@ elif st.session_state['page'] == 'plan_flipkart':
                 if 'SKU Id' in ed.columns: ed = ed.sort_values(by='SKU Id', key=lambda s: s.str.upper()).reset_index(drop=True)
                 st.session_state['plan_editor_df'] = ed.reset_index(drop=True)
 
-        def render_editor_for_df(local_df, key_suffix):
-            if local_df.empty:
-                st.info("No rows for this selection.")
-                return local_df
-            edited = st.data_editor(local_df, key=f"editor_{key_suffix}", use_container_width=True, hide_index=True, column_config={"Select": st.column_config.CheckboxColumn("Select", width="small"), "Required Qty": st.column_config.NumberColumn("Required Qty"), "Editable Boxes": st.column_config.NumberColumn("Editable Boxes"), "Editable Qty": st.column_config.NumberColumn("Editable Qty")}, disabled=[])
-            return edited
-
+        tabs = st.tabs(["All"] + ZONES_ORDER)
         with tabs[0]:
-            pe = st.session_state['plan_editor_df'].copy()
-            for col in ['PPCN', 'Stock', 'Qty_Booked', 'Required Qty', 'Editable Boxes', 'Editable Qty']:
-                if col not in pe.columns: pe[col] = 0
-            all_view = pe.groupby(['SKU Id','PPCN','Stock','Qty_Booked'])[['Required Qty','Editable Boxes','Editable Qty']].sum().reset_index()
-            if 'Select' not in all_view.columns: all_view.insert(0, 'Select', True)
-            if 'SKU Id' in all_view.columns: all_view = all_view.sort_values(by='SKU Id', key=lambda s: s.str.upper()).reset_index(drop=True)
-            edited_all = render_editor_for_df(all_view, "all")
-            if st.button("Apply All Edits Now"):
-                me = st.session_state['plan_editor_df']
-                if not edited_all.empty:
-                    for _, r in edited_all.iterrows():
-                        sku = r['SKU Id']; ppcn = r.get('PPCN', None)
-                        mask = (me['SKU Id'] == sku) & (me['PPCN'] == ppcn)
-                        me.loc[mask, 'Select'] = r['Select']
-                        total_existing = me.loc[mask, 'Editable Qty'].sum()
-                        if total_existing > 0:
-                            factor = r['Editable Qty'] / total_existing if total_existing>0 else 0
-                            me.loc[mask, 'Editable Qty'] = (me.loc[mask, 'Editable Qty'] * factor).round().astype(int)
-                        else:
-                            idxs = me[mask].index.tolist()
-                            if idxs: me.at[idxs[0], 'Editable Qty'] = int(r['Editable Qty'])
-                        me.loc[mask, 'Editable Boxes'] = int(r['Editable Boxes'])
-                    if 'SKU Id' in me.columns: me = me.sort_values(by='SKU Id', key=lambda s: s.str.upper()).reset_index(drop=True)
-                    st.session_state['plan_editor_df'] = me
-                    st.success("Applied edits to master editor.")
+            edited = st.data_editor(st.session_state['plan_editor_df'], key="editor_all", use_container_width=True, hide_index=True)
+            st.session_state['plan_editor_df'] = edited
 
-        for z in ZONES_ORDER:
-            with tabs[ZONES_ORDER.index(z) + 1]:
-                z_df = st.session_state['plan_editor_df'][st.session_state['plan_editor_df']['Zone'] == z].copy()
-                if z_df.empty: st.info(f"No data for {z}")
-                else:
-                    if 'SKU Id' in z_df.columns: z_df = z_df.sort_values(by='SKU Id', key=lambda s: s.str.upper()).reset_index(drop=True)
-                    edited_zone = render_editor_for_df(z_df, f"zone_{z}")
-                    if st.button(f"Apply Edits for {z} to Master", key=f"apply_zone_{z}"):
-                        me = st.session_state['plan_editor_df']
-                        for _, r in edited_zone.iterrows():
-                            mask = (me['SKU Id'] == r['SKU Id']) & (me['Zone'] == r['Zone']) & (me['PPCN'] == r['PPCN'])
-                            me.loc[mask, 'Select'] = r['Select']
-                            me.loc[mask, 'Editable Boxes'] = int(r['Editable Boxes'])
-                            me.loc[mask, 'Editable Qty'] = int(r['Editable Qty'])
-                        if 'SKU Id' in me.columns: me = me.sort_values(by='SKU Id', key=lambda s: s.str.upper()).reset_index(drop=True)
-                        st.session_state['plan_editor_df'] = me
-                        st.success(f"Applied edits for {z}.")
-
-        st.divider()
-        col_b1, col_b2, col_b3 = st.columns([1,1,1])
-        with col_b1:
-            ed_master = st.session_state['plan_editor_df'].copy()
-            if not ed_master.empty:
-                csvb = io.BytesIO(); ed_master.to_csv(csvb, index=False)
-                st.download_button("⬇ Download Editable CSV", csvb.getvalue(), f"Editable_{task_id}.csv", mime="text/csv")
-            else: st.button("No editable data to download", disabled=True)
-        with col_b2:
-            up_ed = st.file_uploader("Upload Edited CSV", type=['csv'], key='upload_edited_csv')
-            if up_ed is not None:
-                try:
-                    edf = pd.read_csv(up_ed, dtype=str)
-                    me = st.session_state['plan_editor_df']
-                    if 'SKU Id' not in edf.columns: st.error("Uploaded CSV must contain 'SKU Id' column.")
-                    else:
-                        for _, r in edf.iterrows():
-                            sku = r['SKU Id']; mask = me['SKU Id'] == sku
-                            if 'Select' in edf.columns:
-                                val = str(r['Select']).strip().lower()
-                                sel = True if val in ['true','1','yes','y','t'] else False
-                                me.loc[mask, 'Select'] = sel
-                            if 'Editable Qty' in edf.columns:
-                                try:
-                                    q = int(float(r['Editable Qty'])); idxs = me[mask].index.tolist()
-                                    if len(idxs) == 1: me.loc[idxs, 'Editable Qty'] = q
-                                    elif len(idxs) > 1:
-                                        per = q // len(idxs); me.loc[idxs, 'Editable Qty'] = per
-                                        remainder = q - per*len(idxs)
-                                        for j in range(remainder): me.at[idxs[j], 'Editable Qty'] += 1
-                                except: pass
-                            if 'Editable Boxes' in edf.columns:
-                                try:
-                                    b = int(float(r['Editable Boxes'])); me.loc[mask, 'Editable Boxes'] = b
-                                except: pass
-                        if 'SKU Id' in me.columns: me = me.sort_values(by='SKU Id', key=lambda s: s.str.upper()).reset_index(drop=True)
-                        st.session_state['plan_editor_df'] = me; st.success("Uploaded and applied edited CSV.")
-                except Exception as e: st.error(f"Failed to read uploaded CSV: {e}")
-        with col_b3:
-            if st.button("Reset Editor to Calculated Results"):
-                if not df_res.empty:
-                    ed = df_res.copy(); ed.insert(0,'Select', True)
-                    if 'Qty_Booked' not in ed.columns: ed['Qty_Booked'] = 0
-                    for c in ['Editable Boxes','Editable Qty','PPCN','Stock','Required Qty','Qty_Booked']:
-                        if c in ed.columns: ed[c] = pd.to_numeric(ed[c], errors='coerce').fillna(0).astype(int)
-                    if 'SKU Id' in ed.columns: ed = ed.sort_values(by='SKU Id', key=lambda s: s.str.upper()).reset_index(drop=True)
-                    st.session_state['plan_editor_df'] = ed.reset_index(drop=True); st.success("Editor reset.")
-                else: st.info("No calculation results to reset from.")
-
-        st.divider()
-        if st.button("💾 SAVE SELECTED ROWS AS TASK (Selected rows only)", type="primary"):
+        if st.button("💾 SAVE TASK", type="primary"):
             ed = st.session_state['plan_editor_df']
-            if 'Select' not in ed.columns: st.error("No selection column found. Nothing to save.")
+            save_df = ed[ed['Select'] == True].copy()
+            if save_df.empty: st.error("No rows selected.")
             else:
-                save_df = ed[ed['Select'] == True].copy()
-                if save_df.empty: st.error("No rows selected to save.")
-                else:
-                    if 'Qty_Booked' not in save_df.columns: save_df['Qty_Booked'] = 0
-                    pack = {'id': task_id, 'date': str(pd.Timestamp.now().date()), 'channel': st.session_state.get('plan_channel','Flipkart'), 'data': save_df.reset_index(drop=True), 'original_data': summary_df if not summary_df.empty else pd.DataFrame(), 'backup_data': pd.DataFrame(), 'sender': {}, 'receiver': {}, 'saved': True, 'printed_boxes': [], 'task_type': 'planning', 'mode_key': st.session_state.get('plan_mode_key','single'), 'is_booked': False}
-                    st.session_state['consignments'].append(pack)
-                    save_history(st.session_state['consignments'])
-                    st.success(f"Task saved: {task_id}")
+                if 'Qty_Booked' not in save_df.columns: save_df['Qty_Booked'] = 0
+                pack = {'id': task_id, 'date': str(pd.Timestamp.now().date()), 'channel': st.session_state.get('plan_channel','Flipkart'), 'data': save_df.reset_index(drop=True), 'original_data': summary_df, 'backup_data': pd.DataFrame(), 'sender': {}, 'receiver': {}, 'saved': True, 'printed_boxes': [], 'task_type': 'planning', 'mode_key': st.session_state.get('plan_mode_key','single'), 'is_booked': False}
+                st.session_state['consignments'].append(pack)
+                save_history(st.session_state['consignments'])
+                st.success(f"Task saved: {task_id}")
 
         st.divider()
         tpl_db = load_template_db(mode_key)
@@ -1152,7 +1057,6 @@ elif st.session_state['page'] == 'channel':
     st.title(f"{st.session_state.get('current_channel','Channel')} Shipments")
     ch = st.session_state.get('current_channel', 'Flipkart')
     cons = [c for c in st.session_state['consignments'] if c['channel'] == ch]
-    if not cons: st.info("No shipments found for this channel.")
     for c in reversed(cons[-10:]):
         boxes_sum = int(c['data']['Editable Boxes'].sum()) if isinstance(c.get('data', None), pd.DataFrame) and 'Editable Boxes' in c['data'].columns else 0
         col1, col2 = st.columns([0.8, 0.2])
@@ -1222,50 +1126,56 @@ elif st.session_state['page'] == 'view_saved':
     st.title(f"Consignment: {c_id}")
     if pkg.get('edit_timestamp'): st.info(f"ℹ️ This consignment has been edited on {pkg['edit_timestamp']}")
 
-    st.subheader("1. Download Files (Generated)")
-    r1c1, r1c2, r1c3 = st.columns(3)
-    with r1c1:
-        orig_csv = io.BytesIO()
-        if isinstance(pkg.get('original_data', None), pd.DataFrame) and not pkg['original_data'].empty: pkg['original_data'].to_csv(orig_csv, index=False)
-        st.download_button("⬇ Consignment CSV (Raw)", orig_csv.getvalue(), f"{c_id}.csv", "text/csv")
-    with r1c2: st.download_button("⬇ Consignment Data PDF", generate_consignment_data_pdf(pkg['data'], pkg), f"Data_{c_id}.pdf")
-    with r1c3: st.download_button("⬇ Confirm Consignment Upload (CSV)", generate_confirm_consignment_csv(pkg['data']), f"Confirm_{c_id}.csv", "text/csv")
+    # Files
+    with st.expander("📂 Files & Downloads", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            orig_csv = io.BytesIO()
+            if isinstance(pkg.get('original_data', None), pd.DataFrame) and not pkg['original_data'].empty: pkg['original_data'].to_csv(orig_csv, index=False)
+            st.download_button("⬇ Consignment CSV (Raw)", orig_csv.getvalue(), f"{c_id}.csv", "text/csv")
+        with c2: st.download_button("⬇ Consignment Data PDF", generate_consignment_data_pdf(pkg['data'], pkg), f"Data_{c_id}.pdf")
+        with c3: st.download_button("⬇ Confirm CSV", generate_confirm_consignment_csv(pkg['data']), f"Confirm_{c_id}.csv", "text/csv")
+    
+    c1, c2 = st.columns(2)
+    with c1: st.download_button("⬇ Product Labels (Bartender)", generate_bartender_full(pkg['data']), f"Bartender_All_{c_id}.xlsx")
+    with c2: st.download_button("⬇ Ewaybill Data (Excel)", generate_excel_simple(pkg['data'], ['SKU Id', 'Editable Qty', 'Cost Price'], f"Eway_{c_id}.xlsx"), f"Eway_{c_id}.xlsx")
 
-    r2c1, r2c2, r2c3 = st.columns(3)
-    with r2c1: st.download_button("⬇ Product Labels (Bartender)", generate_bartender_full(pkg['data']), f"Bartender_All_{c_id}.xlsx")
-    with r2c2: st.download_button("⬇ Ewaybill Data (Excel)", generate_excel_simple(pkg['data'], ['SKU Id', 'Editable Qty', 'Cost Price'], f"Eway_{c_id}.xlsx"), f"Eway_{c_id}.xlsx")
-
+    # Labels Merge - FIXED
     st.divider()
-    st.subheader("2. File Repository & Merged Labels")
+    st.subheader("Label Management")
     uc1, uc2 = st.columns([1, 1])
+    
     with uc1:
         f_lbl = st.file_uploader("Upload Flipkart Box Labels PDF", type=['pdf'], key='u_lbl')
         if f_lbl:
             if st.button("Process & Merge Labels"):
-                save_uploaded_file(f_lbl, c_id, 'box_labels')
-                progress_bar = st.progress(0, text="Starting Merge...")
-                path_lbl = get_stored_file_bytes(c_id, 'box_labels') # Drive bytes
-                if path_lbl:
-                    snd = pkg.get('sender', {}); rcv = pkg.get('receiver', {})
-                    merged_bytes = generate_merged_box_labels(pkg['data'], pkg, snd, rcv, path_lbl, progress_bar)
-                    if merged_bytes:
-                        StorageHandler.upload_file(f"{c_id}_merged_labels.pdf", merged_bytes, "Save Merged Labels")
-                        progress_bar.progress(100, text="Completed!"); time.sleep(1)
-                        st.success("Uploaded & Merged!"); st.rerun()
-                else: st.error("Failed to retrieve uploaded file")
+                # 1. Process IN MEMORY
+                raw_bytes = f_lbl.getvalue()
+                progress_bar = st.progress(0, text="Merging Labels...")
+                snd = pkg.get('sender', {}); rcv = pkg.get('receiver', {})
+                
+                merged_bytes = generate_merged_box_labels(pkg['data'], pkg, snd, rcv, raw_bytes, progress_bar)
+                
+                if merged_bytes:
+                    # 2. Save Results to Cloud in Background
+                    try:
+                        StorageHandler.upload_file(f"{c_id}_box_labels.pdf", raw_bytes, "Source Labels")
+                        StorageHandler.upload_file(f"{c_id}_merged_labels.pdf", merged_bytes, "Merged Labels")
+                        st.success("Merged & Saved!")
+                        time.sleep(1)
+                        st.rerun()
+                    except:
+                        st.warning("Merged successfully but failed to save to cloud. You can still download/print.")
+                else:
+                    st.error("Merge failed.")
 
     with uc2:
         path_merged = get_merged_labels_bytes(c_id)
         if path_merged:
-            st.download_button("⬇ Download MERGED Box Labels", path_merged, f"Merged_Labels_{c_id}.pdf", "application/pdf")
-            st.divider()
-            if st.button("🖨️ SCAN & PRINT BOX LABELS", type="primary", use_container_width=True): nav('scan_print')
-        elif get_stored_file_exists(c_id, 'box_labels'):
-            st.warning("Labels uploaded but not merged yet. Click 'Process & Merge'.")
-            st.button("🖨️ SCAN & PRINT BOX LABELS", disabled=True, key='dis_scan')
+            st.download_button("⬇ Download MERGED PDF", path_merged, f"Merged_{c_id}.pdf", "application/pdf")
+            if st.button("🖨️ SCAN & PRINT MODE", type="primary", use_container_width=True): nav('scan_print')
         else:
-            st.button("⬇ Download Box Labels", disabled=True, key='d_lbl_dis', help="Upload PDF first")
-            st.button("🖨️ SCAN & PRINT BOX LABELS", disabled=True, key='dis_scan_2')
+            st.info("Upload and merge labels to enable printing.")
 
     st.divider()
     st.subheader("3. Appointment & Challan")
@@ -1355,7 +1265,15 @@ elif st.session_state['page'] == 'scan_print':
     pkg = st.session_state['curr_con']; c_id = pkg['id']
     merged_pdf_bytes = get_merged_labels_bytes(c_id)
 
-    # 1. Expand Box Data for the Table
+    c_back, c_spacer, c_print = st.columns([1, 4, 2])
+    with c_back:
+        if st.button("🔙 Back", use_container_width=True): nav('view_saved')
+    with c_print:
+        printer_name = st.text_input("Printer Name (QZ Tray)", value="ZDesigner GK420t", key='selected_printer_name')
+
+    st.divider()
+
+    # Prepare Data
     if 'scan_box_data' not in st.session_state or st.session_state.get('scan_c_id') != c_id:
         box_data = []
         active_df = pkg['data'][pkg['data']['Editable Boxes'] > 0].sort_values(by='SKU Id')
@@ -1365,84 +1283,84 @@ elif st.session_state['page'] == 'scan_print':
             try: boxes = int(row['Editable Boxes'])
             except: boxes = 0
             for _ in range(boxes):
-                box_data.append({'Box No': current_box, 'SKU': str(row['SKU Id']), 'FSN': str(row.get('FSN', '')), 'EAN': str(row.get('EAN', '')).replace('.0',''), 'Qty': int(row['PPCN'])})
+                box_data.append({'Box No': current_box, 'SKU': str(row['SKU Id']), 'FSN': str(row.get('FSN','')), 'EAN': str(row.get('EAN',''))})
                 current_box += 1
         if not zero_df.empty:
-            dummy_count = math.ceil(len(zero_df) / 20)
-            for _ in range(dummy_count):
-                box_data.append({'Box No': current_box, 'SKU': "MIX SKU", 'FSN': "MIX FSN", 'EAN': "", 'Qty': 1})
+            for _ in range(math.ceil(len(zero_df)/20)):
+                box_data.append({'Box No': current_box, 'SKU': "MIX SKU", 'FSN': "MIX FSN", 'EAN': ""})
                 current_box += 1
         st.session_state['scan_box_data'] = pd.DataFrame(box_data)
         st.session_state['scan_c_id'] = c_id
-        st.session_state['last_printed_box'] = None
 
-    df_boxes = st.session_state['scan_box_data']
+    # RENDER FRAGMENT
+    if merged_pdf_bytes:
+        render_scan_interface(st.session_state['scan_box_data'], pkg, merged_pdf_bytes)
+    else:
+        st.error("Merged PDF not found. Please merge labels first.")
 
-    # --- UI LAYOUT ---
-    c_back, c_spacer, c_print = st.columns([1, 4, 2])
-    with c_back:
-        if st.button("🔙 Back", use_container_width=True): nav('view_saved')
-    with c_print:
-        # Replaced win32 listing with text input for QZ Tray
-        printer_name = st.text_input("Printer Name (QZ Tray)", value="ZDesigner GK420t", key='selected_printer_name')
-
-    st.divider()
-    
-    # 2. Logic for Printing/Scanning (Modified for QZ Tray)
-    def process_scan():
-        scan_val = st.session_state.scan_input.strip()
-        if not scan_val: return
-        matches = df_boxes[(df_boxes['SKU'] == scan_val) | (df_boxes['FSN'] == scan_val) | (df_boxes['EAN'] == scan_val)]
-        if matches.empty: st.toast(f"❌ Product not found: {scan_val}", icon="⚠️")
+# ---------------- History Page ----------------
+if st.session_state['page'] == 'history':
+    st.title("Task History")
+    tasks = st.session_state.get('consignments', [])
+    tabs = st.tabs(["New Task", "Planning", "Execution", "Booked Summary"])
+    with tabs[0]:
+        st.header("Create New Task")
+        if st.button("➕ New Plan (Flipkart)"):
+            st.session_state['plan_channel'] = 'Flipkart'; nav('plan_flipkart')
+    with tabs[1]:
+        st.header("Planning Tasks")
+        planning = [t for t in tasks if t.get('task_type') == 'planning']
+        if not planning: st.info("No planning tasks yet.")
         else:
-            printed_set = set(pkg.get('printed_boxes', []))
-            valid_boxes = matches[~matches['Box No'].isin(printed_set)]
-            if valid_boxes.empty: st.toast(f"✅ All boxes for {scan_val} already printed!", icon="ℹ️")
+            for t in planning:
+                st.subheader(f"Task: {t['id']} | Date: {t.get('date','-')} | Channel: {t.get('channel','-')}")
+                if isinstance(t.get('data', None), pd.DataFrame):
+                    df_preview = t['data'].copy()
+                    if 'Qty_Booked' not in df_preview.columns: df_preview['Qty_Booked'] = 0
+                    st.dataframe(df_preview.head(6), use_container_width=True)
+                if st.button(f"Open {t['id']}", key=f"open_plan_{t['id']}"):
+                    st.session_state['plan_task_id'] = t['id']
+                    st.session_state['plan_results'] = t.get('data', pd.DataFrame()).copy()
+                    st.session_state['plan_summary'] = t.get('original_data', pd.DataFrame()).copy() if isinstance(t.get('original_data', None), pd.DataFrame) else pd.DataFrame()
+                    ed = st.session_state['plan_results'].copy() if isinstance(st.session_state['plan_results'], pd.DataFrame) else pd.DataFrame()
+                    if 'Select' not in ed.columns: ed.insert(0, 'Select', True)
+                    if 'Qty_Booked' not in ed.columns: ed['Qty_Booked'] = 0
+                    for c in ['Editable Boxes','Editable Qty','PPCN','Stock','Required Qty','Qty_Booked']:
+                        if c in ed.columns: ed[c] = pd.to_numeric(ed[c], errors='coerce').fillna(0).astype(int)
+                    if 'SKU Id' in ed.columns: ed = ed.sort_values(by='SKU Id', key=lambda s: s.str.upper()).reset_index(drop=True)
+                    st.session_state['plan_editor_df'] = ed.reset_index(drop=True)
+                    st.session_state['plan_mode_key'] = t.get('mode_key', 'single')
+                    st.session_state['plan_channel'] = t.get('channel', 'Flipkart')
+                    nav('plan_flipkart')
+    with tabs[2]:
+        st.header("Execution (Shipments / Manual) Tasks")
+        execs = [t for t in tasks if t.get('task_type') == 'execution']
+        # Use fragment for smooth scrolling/clicking
+        render_history_list(execs) 
+    with tabs[3]:
+        st.header("Booked Summary")
+        booked_details, available_dates = compute_booked_details_from_history()
+        if not booked_details: st.info("No booked quantities found.")
+        else:
+            st.subheader("Available pickup dates")
+            available_dates_sorted = sorted(available_dates)
+            selected_dates = st.multiselect("Select pickup dates", options=available_dates_sorted, default=available_dates_sorted)
+            rows = []
+            for sku, d in booked_details.items():
+                if selected_dates:
+                    filtered = {dt:info for dt,info in d['dates'].items() if dt in selected_dates}
+                    total_qty = sum(info['qty'] for info in filtered.values())
+                    total_boxes = sum(info['boxes'] for info in filtered.values())
+                    if total_qty == 0: continue
+                    dates_str = ", ".join([f"{pd.to_datetime(dt).strftime('%d %b')}:{info['qty']}({info['boxes']})" for dt,info in filtered.items()])
+                else:
+                    total_qty = d.get('total_qty', 0)
+                    total_boxes = d.get('total_boxes', 0)
+                    dates_str = ", ".join([f"{pd.to_datetime(dt).strftime('%d %b')}:{info['qty']}({info['boxes']})" for dt,info in d.get('dates', {}).items()])
+                rows.append({'SKU': sku, 'Qty': total_qty, 'Boxes': total_boxes, 'Dates': dates_str})
+            if not rows: st.info("No booked SKUs for selected dates.")
             else:
-                target_box = valid_boxes.iloc[0]['Box No']
-                pdf_data = extract_label_pdf_bytes(merged_pdf_bytes, int(target_box)-1)
-                if pdf_data:
-                    qz_tray_print_component(pdf_data, st.session_state.selected_printer_name)
-                    st.session_state['last_printed_box'] = int(target_box)
-                    if 'printed_boxes' not in pkg: pkg['printed_boxes'] = []
-                    pkg['printed_boxes'].append(int(target_box))
-                    save_history(st.session_state['consignments'])
-                    st.toast(f"🖨️ Sent Box {target_box} to QZ Tray", icon="✅")
-                else: st.toast("Error extracting label PDF", icon="❌")
-        st.session_state.scan_input = ""
-
-    def trigger_reprint(box_num):
-        pdf_data = extract_label_pdf_bytes(merged_pdf_bytes, int(box_num)-1)
-        if pdf_data:
-            qz_tray_print_component(pdf_data, st.session_state.selected_printer_name)
-            st.session_state['last_printed_box'] = int(box_num)
-            st.toast(f"🖨️ Re-sent Box {box_num} to QZ Tray", icon="✅")
-        else: st.toast("Error extracting label PDF", icon="❌")
-
-    st.text_input("SCAN BARCODE (EAN / SKU / FSN)", key='scan_input', on_change=process_scan, placeholder="Click here and scan...", help="Press Enter after scanning")
-
-    last_p = st.session_state.get('last_printed_box')
-    if last_p: st.info(f"🖨️ Last Printed: **BOX {last_p}**", icon="✨")
-
-    printed_set = set(pkg.get('printed_boxes', []))
-    display_df = df_boxes.copy()
-    display_df['Status'] = display_df['Box No'].apply(lambda x: '✅ PRINTED' if x in printed_set else 'WAITING')
-
-    def highlight_rows(row):
-        box_num = row['Box No']
-        if box_num == st.session_state.get('last_printed_box'): return ['background-color: #fff3cd'] * len(row)
-        elif row['Status'] == '✅ PRINTED': return ['background-color: #d4edda'] * len(row)
-        return [''] * len(row)
-
-    st.subheader("Box List")
-    st.caption("💡 Click a row to see Reprint options")
-    event = st.dataframe(display_df.style.apply(highlight_rows, axis=1), use_container_width=True, hide_index=True, height=500, on_select="rerun", selection_mode="single-row")
-
-    if event.selection.rows:
-        selected_idx = event.selection.rows[0]
-        selected_box = display_df.iloc[selected_idx]['Box No']
-        col_act1, col_act2 = st.columns([3, 1])
-        with col_act1: st.warning(f"Selected: **Box {selected_box}**")
-        with col_act2:
-            if st.button(f"🖨️ Reprint Box {selected_box}", type="primary", use_container_width=True):
-                trigger_reprint(selected_box)
+                bm_df = pd.DataFrame(rows).sort_values(by='SKU', key=lambda s: s.str.upper()).reset_index(drop=True)
+                st.dataframe(bm_df, use_container_width=True)
+                pdf_bytes = generate_booked_summary_pdf_bytes(booked_details, selected_dates if selected_dates else None)
+                st.download_button("⬇ Download Booked Summary PDF", pdf_bytes, file_name="Booked_Summary.pdf", mime="application/pdf")
